@@ -1,0 +1,206 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+
+  <title>The HTML5 Herald</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.7.2/Chart.bundle.js"></script>
+  <style>
+      .chart-container {
+        width: 50%;
+        height: 50%;
+      }
+  </style>
+
+<body>
+    <p id="loading">Loading...</p>
+    <button id="up">Up</button>
+    <div class="chart-container">
+        <canvas id="myChart" width="100" height="100"></canvas>
+    </div>
+    <select id="field">
+        <option value="tip">tip</option>
+        <option value="fareAmount">fare</option>
+        <option value="passengers">passengers</option>
+    </select>
+    <select id="operator">
+        <option value="less">less</option>
+        <option value="=">equal</option>
+        <option value="more">more</option>
+    </select>
+    <input type="text" id="value" />
+    <button id="and">AND</button>
+    <button id="add">ADD</button>
+    <script>
+        var ctx = document.getElementById("myChart").getContext('2d');
+        var loading = document.getElementById("loading");
+        var up = document.getElementById("up");
+        var field = document.getElementById("field");
+        var operator = document.getElementById("operator");
+        var textArea = document.getElementById("value");
+        var andButton = document.getElementById("and");
+        var addButton = document.getElementById("add");
+        var where = null;
+        var i = 0;
+        var level = 0;
+        var month= null;
+
+        up.style.display = 'none';
+        up.onclick = function() {
+            level = 0;
+            fetchData();
+        }
+        var myChart;
+        var data = {
+                labels: [],
+                datasets: []
+            };
+
+        andButton.onclick = and;
+        addButton.onclick = add;
+
+        function draw(drilledIn=false) {
+            myChart = new Chart(ctx, {
+                type: 'line',
+                data: data,
+                options: {
+                    onClick: function(event, elems) {
+                        if (elems.length > 0 && level == 0) {
+                            var chartData = elems[0]['_chart'].config.data;
+                            var idx = elems[0]['_index'];
+                            loading.style.display = 'block';
+                            month = chartData.labels[idx];
+                            level = 1;
+                            fetchData();
+                        }
+                    },
+                    events: ["click"],
+                    scales: {
+                        yAxes: [{
+                            ticks: {
+                                beginAtZero:true
+                            }
+                        }]
+                    }
+                }
+            });
+        }
+
+        function addDataset(newData) {
+            i++;
+            loading.style.display = 'none';
+            data.labels = newData.periods;
+            data.datasets.push({
+                label: newData.where,
+                data: newData.counts
+            });
+            myChart.update();
+        }
+
+        function fetchData() {
+            where = null;
+            loading.style.display = 'block';
+            data = {
+                labels: [],
+                datasets: []
+            };
+
+            var fetchQ = "";
+            if (level == 0) {
+                month = null;
+                up.style.display = 'none';
+                fetchQ = "/all?vendor=1";
+            } else if (level == 1) {
+                up.style.display = 'block';
+                fetchQ = "/one?month="+month+"&vendor=1";
+            }
+            if (myChart) {
+                myChart.destroy()
+            }
+            fetch(fetchQ).then(function(resp) {
+                resp.json().then(function(newData) {
+                    draw();
+                    addDataset(newData);
+                });
+            });
+            // fetch("/all?vendor=2").then(function(resp) {
+            //     resp.json().then(function(data) {
+            //         addDataset(data);
+            //     });
+            // });
+        }
+
+        function and() {
+            // myChart.destroy()
+            var f = field.value;
+            var op = operator.value;
+            var txt = textArea.value;
+            var opVal = "=";
+            if (op == "less") {
+                opVal = "<";
+            } else if (op == "more") {
+                opVal = ">";
+            }
+
+            var query = f + opVal + txt;
+            if (where == null) {
+                where = query
+            } else {
+                where = where + " AND " + query;
+            }
+
+            query = "all";
+            if (level == 1) {
+                query = "one";
+            }
+            var monthQ = "";
+            if (month != null) {
+                monthQ = "&month="+month;
+            }
+
+            loading.style.display = 'block';
+            fetch("/"+query+"?vendor=1&where="+where+monthQ).then(function(resp) {
+                resp.json().then(function(data) {
+                    draw();
+                    addDataset(data);
+                });
+            });
+        }
+
+        function add() {
+            // myChart.destroy()
+            var f = field.value;
+            var op = operator.value;
+            var txt = textArea.value;
+            var opVal = "=";
+            if (op == "less") {
+                opVal = "<";
+            } else if (op == "more") {
+                opVal = ">";
+            }
+
+            var tempWhere = f + opVal + txt;
+
+            var query = "all";
+            if (level == 1) {
+                query = "one";
+            }
+            var monthQ = "";
+            if (month != null) {
+                monthQ = "&month="+month;
+            }
+
+            loading.style.display = 'block';
+            fetch("/"+query+"?vendor=1&where="+tempWhere+monthQ).then(function(resp) {
+                resp.json().then(function(data) {
+                    draw();
+                    addDataset(data);
+                });
+            });
+        }
+
+        fetchData();
+    </script>
+</body>
+</html>
