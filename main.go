@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"encoding/csv"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,8 +24,7 @@ func routes() *mux.Router {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/", index).Methods("GET")
-	router.HandleFunc("/all", allData).Methods("GET")
-	router.HandleFunc("/one", oneData).Methods("GET")
+	router.HandleFunc("/all", yearData).Methods("GET")
 	s := http.StripPrefix("/static/", http.FileServer(http.Dir("./static/")))
 	router.PathPrefix("/static/").Handler(s).Methods("GET")
 
@@ -43,7 +46,7 @@ func run() (*http.Server, error) {
 	return srv, nil
 }
 
-func main() {
+func runServer() {
 	var err error
 	cluster, err = gocb.Connect("couchbase://localhost")
 	if err != nil {
@@ -73,28 +76,28 @@ func main() {
 	srv.Shutdown(nil)
 }
 
+func main() {
+	reformat := flag.Bool("reformat", false, "Reformat the taxis csv file")
+	path := flag.String("csv", "", "Path to the the taxis csv file for reformatting")
+	flag.Parse()
+
+	if *reformat {
+		if *path == "" {
+			panic("path must be used if reformat is set")
+		}
+
+		processData(*path)
+	} else {
+		runServer()
+	}
+}
+
 func index(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/static/", http.StatusFound)
 }
 
-func oneData(w http.ResponseWriter, r *http.Request) {
-	vendor := r.URL.Query()["vendor"][0]
-	whereQ := r.URL.Query()["where"]
-	monthStr := r.URL.Query()["month"][0]
-	month, _ := strconv.ParseFloat(monthStr, 64)
-	where := ""
-	if month == 1 {
-		where = `pickupDate <= "2016-01-31 23:59:59"`
-	} else if month == 12 {
-		where = `pickupDate > "2016-12-01 00:00:00"`
-	} else {
-		where = fmt.Sprintf(`pickupDate > "2016-%02g-01 00:00:00" AND pickupDate <= "2016-%02g-31 23:59:59"`, month, month)
-	}
-	if len(whereQ) > 0 {
-		where = where + " AND " + whereQ[0]
-	}
-	queryTxt := fmt.Sprintf(`select DATE_PART_STR(pickupDate, 'day') AS day, COUNT(*) as count FROM
-	vendor%staxis WHERE %s GROUP BY DATE_PART_STR(pickupDate, 'day');`, vendor, where)
+func getData(queryTxt string) (*calendarData, error) {
+	fmt.Println(queryTxt)
 	query := gocb.NewAnalyticsQuery(queryTxt)
 	results, err := cluster.ExecuteAnalyticsQuery(query)
 	if err != nil {
@@ -102,30 +105,70 @@ func oneData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var row map[string]interface{}
-	var days []float64
+	var dateParts []float64
 	var counts []float64
-	// var fares []float64
-	// var tips []float64
 	for results.Next(&row) {
-		if day, ok := row["day"]; ok {
-			days = append(days, day.(float64))
+		if datePart, ok := row["period"]; ok {
+			dateParts = append(dateParts, datePart.(float64))
 			counts = append(counts, row["count"].(float64))
-			// tips = append(tips, row["tips"].(float64))
-			// fares = append(fares, row["fares"].(float64))
 		}
 	}
 	if err = results.Close(); err != nil {
+		return nil, err
+	}
+
+	return &calendarData{
+		DateParts: dateParts,
+		Counts:    counts,
+	}, nil
+}
+
+func yearData(w http.ResponseWriter, r *http.Request) {
+	whereQ := r.URL.Query()["where"]
+	periodQ := r.URL.Query()["period"]
+	aggregate := r.URL.Query()["aggregate"][0]
+	period := "month"
+	where := ""
+	if len(periodQ) > 0 {
+		period = periodQ[0]
+		if period == "day" {
+			month := r.URL.Query()["month"][0]
+			if month == "1" {
+				where = `pickupDate <= "2016-01-31 23:59:59"`
+			} else if month == "12" {
+				where = `pickupDate >= "2016-12-01 00:00:00"`
+			} else {
+				monthInt, _ := strconv.ParseFloat(month, 64)
+				where = fmt.Sprintf(`pickupDate >= "2016-%02g-01T00:00:00" AND pickupDate <= "2016-%02g-31T23:59:59"`, monthInt, monthInt)
+			}
+		} else if period == "hour" {
+			month := r.URL.Query()["month"][0]
+			monthInt, _ := strconv.ParseFloat(month, 64)
+			day := r.URL.Query()["day"][0]
+			dayInt, _ := strconv.ParseFloat(day, 64)
+			where = fmt.Sprintf(`pickupDate > "2016-%02g-%02gT00:00:00" AND pickupDate <= "2016-%02g-%02gT23:59:59"`, monthInt, dayInt, monthInt, dayInt)
+		}
+	}
+	if len(whereQ) > 0 {
+		if len(where) > 0 {
+			where = fmt.Sprintf("%s AND %s", where, whereQ[0])
+		} else {
+			where = fmt.Sprintf("%s", whereQ[0])
+		}
+	}
+
+	if len(where) > 0 {
+		where = fmt.Sprintf("WHERE %s", where)
+	}
+	query := fmt.Sprintf(`select DATE_PART_STR(pickupDate, "%s") AS period, %s as count FROM
+	alltaxis %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`, period, aggregate, where, period)
+	data, err := getData(query)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
-	data := calendarData{
-		Periods: days,
-		Counts:  counts,
-		Where:   where,
-		// Fares: fares,
-		// Tips:  tips,
-	}
-	js, err := json.Marshal(data)
+	data.Where = aggregate + where
+	js, err := json.Marshal(*data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -135,87 +178,134 @@ func oneData(w http.ResponseWriter, r *http.Request) {
 	w.Write(js)
 
 }
-
-func allData(w http.ResponseWriter, r *http.Request) {
-	vendor := r.URL.Query()["vendor"][0]
-	where := r.URL.Query()["where"]
-	whereTxt := ""
-	if len(where) > 0 {
-		whereTxt = "WHERE " + where[0]
-	}
-	query := gocb.NewAnalyticsQuery(fmt.Sprintf(`select DATE_PART_STR(pickupDate, 'month') AS month, COUNT(*) as count FROM
-	vendor%staxis %s GROUP BY DATE_PART_STR(pickupDate, 'month');`, vendor, whereTxt))
-	results, err := cluster.ExecuteAnalyticsQuery(query)
+func processData(path string) {
+	destFile, err := os.Create("2016_Green_Taxi_Trip_Data.csv")
 	if err != nil {
-		panic("ERROR EXECUTING ANALYTICS:" + err.Error())
+		panic(err.Error())
+	}
+	defer destFile.Close()
+	csvFile, err := os.Open(path)
+	if err != nil {
+		panic(err.Error())
+	}
+	defer csvFile.Close()
+
+	wr := csv.NewWriter(destFile)
+	defer wr.Flush()
+
+	reader := csv.NewReader(bufio.NewReader(csvFile))
+	layout := "01/02/2006 15:04:05"
+
+	headers := []string{
+		"vendorID",
+		"pickupDate",
+		"dropoffDate",
+		"storeFlag",
+		"rateCode",
+		"pickupLon",
+		"pickupLat",
+		"dropoffLon",
+		"dropoffLat",
+		"passengers",
+		"tripDistance",
+		"fareAmount",
+		"extra",
+		"mta",
+		"tip",
+		"tolls",
+		"ehail",
+		"improvement",
+		"total",
+		"paymentType",
+		"tripType",
+		"pickupLocation",
+		"dropoffLocation",
+		"type",
 	}
 
-	var row map[string]interface{}
-	var months []float64
-	var counts []float64
-	// var fares []float64
-	// var tips []float64
-	for results.Next(&row) {
-		if month, ok := row["month"]; ok {
-			months = append(months, month.(float64))
-			counts = append(counts, row["count"].(float64))
-			// tips = append(tips, row["tips"].(float64))
-			// fares = append(fares, row["fares"].(float64))
+	err = wr.Write(headers)
+	if err != nil {
+		panic(err.Error())
+	}
+	reader.Read()
+	for {
+		line, err := reader.Read()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			panic(err.Error())
+		}
+
+		t := []string{
+			(line[0]),
+			line[1],
+			line[2],
+			line[3],
+			(line[4]),
+			(line[5]),
+			(line[6]),
+			(line[7]),
+			(line[8]),
+			(line[9]),
+			(line[10]),
+			(line[11]),
+			(line[12]),
+			(line[13]),
+			(line[14]),
+			(line[15]),
+			(line[16]),
+			(line[17]),
+			(line[18]),
+			(line[19]),
+			(line[20]),
+			line[21],
+			line[22],
+			"green",
+		}
+
+		pickup, err := time.Parse(layout, t[1][0:len(t[1])-3])
+		if err != nil {
+			panic(err.Error())
+		}
+
+		dropoff, err := time.Parse(layout, t[2][0:len(t[2])-3])
+		if err != nil {
+			panic(err.Error())
+		}
+
+		pickupHour := pickup.Hour()
+		if t[1][len(t[1])-2:] == "PM" {
+			if pickupHour != 12 {
+				pickupHour = pickupHour + 12
+			}
+		} else if pickupHour == 12 {
+			pickupHour = 0
+		}
+
+		dropoffHour := dropoff.Hour()
+		if t[2][len(t[1])-2:] == "PM" {
+			if dropoffHour != 12 {
+				dropoffHour = dropoffHour + 12
+			}
+		} else if dropoffHour == 12 {
+			dropoffHour = 0
+		}
+
+		t[1] = fmt.Sprintf("%d-%02d-%02dT%02d:%02d:%02d", pickup.Year(), pickup.Month(), pickup.Day(),
+			pickupHour, pickup.Minute(), pickup.Second())
+
+		t[2] = fmt.Sprintf("%d-%02d-%02dT%02d:%02d:%02d", dropoff.Year(), dropoff.Month(), dropoff.Day(),
+			dropoffHour, dropoff.Minute(), dropoff.Second())
+
+		err = wr.Write(t)
+		if err != nil {
+			panic(err.Error())
 		}
 	}
-	if err = results.Close(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-
-	data := calendarData{
-		Periods: months,
-		Counts:  counts,
-		// Fares: fares,
-		// Tips:  tips,
-		Where: whereTxt,
-	}
-	js, err := json.Marshal(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-
-	w.WriteHeader(200)
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(js)
-
 }
 
 type calendarData struct {
-	Periods []float64 `json:"periods"`
-	Counts  []float64 `json:"counts"`
-	Fares   []float64 `json:"fares"`
-	Tips    []float64 `json:"tips"`
-	Where   string    `json:"where"`
-}
-
-type trip struct {
-	VendorID     uint    `json:"vendor_id,omitempty"`
-	PickupDate   string  `json:"pickup_date,omitempty"`
-	DropoffDate  string  `json:"dropoff_date,omitempty"`
-	StoreFlag    string  `json:"store_flag,omitempty"`
-	RateCode     uint    `json:"rate_code,omitempty"`
-	PickupLon    float64 `json:"pickup_lon,omitempty"`
-	PickupLat    float64 `json:"pickup_lat,omitempty"`
-	DropoffLon   float64 `json:"dropoff_lon,omitempty"`
-	DropoffLat   float64 `json:"dropoff_lat,omitempty"`
-	Passengers   uint    `json:"passengers,omitempty"`
-	TripDistance float64 `json:"trip_distance,omitempty"`
-	FareAmount   float64 `json:"fare_amount,omitempty"`
-	Extra        float64 `json:"extra,omitempty"`
-	MTA          float64 `json:"mta,omitempty"`
-	Tip          float64 `json:"tip,omitempty"`
-	Tolls        float64 `json:"tolls,omitempty"`
-	Ehail        float64 `json:"ehail,omitempty"`
-	Improvement  float64 `json:"improvement,omitempty"`
-	Total        float64 `json:"total,omitempty"`
-	PaymentType  uint    `json:"payment_type,omitempty"`
-	TripType     uint    `json:"trip_type,omitempty"`
-	PULocation   string  `json:"pickup_location,omitempty"`
-	DOLocation   string  `json:"dropoff_location,omitempty"`
-	TaxiType     string  `json:"type,omitempty"`
+	DateParts []float64 `json:"periods"`
+	Counts    []float64 `json:"counts"`
+	Where     string    `json:"where"`
 }
