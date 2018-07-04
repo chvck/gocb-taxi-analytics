@@ -7,76 +7,121 @@
   <title>NYC Taxis</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.7.2/Chart.bundle.js"></script>
   <style>
+      body {
+          font-family: Arial, Helvetica, sans-serif;
+      }
       .chart-container {
         width: 50%;
         max-height: 50%;
+        float: left;
+      }
+
+      h1 {
+        text-align: center;
+      }
+
+      #controls {
+        margin-left: 2%;
+        width: 45%;
+        float: left;
+      }
+
+      #where-display {
+        display: block;
+        width: 100%;
+        margin-bottom: 1em;
+      }
+
+      #where-controls {
+        margin-bottom: 1em;
+     }
+
+      #send {
+          height: 2em;
+      }
+
+      #controls select {
+          width: 15%;
+      }
+
+      #where-input {
+          width: 50%;
       }
   </style>
 
 <body>
-    <p id="loading">Loading...</p>
-    <button id="up">Up</button>
+    <h1>Analysing NYC Taxi Data</h1>
     <div class="chart-container">
         <canvas id="myChart" width="100" height="100"></canvas>
-        <canvas id="myChart2" width="100" height="100"></canvas>
     </div>
-    <h2>Options</h2>
-    <div>
-        <h3>Aggregate</h3>
-        <select id="aggregate">
-            <option value="count">Count</option>
-            <option value="avg">Avg</option>
-        </select>
-        <select id="aggregateOptionsCount">
-            <option value="*">*</option>
-        </select>
-        <select id="aggregateOptionsAvg" style="display: none">
-            <option value="tip">tip</option>
-            <option value="fareAmount">fare</option>
-            <option value="passengers">passengers</option>
-            <option value="tripDistance">distance</option>
-        </select>
+    <div id="controls">
+        <p id="loading" style="display:none;">Loading...</p>
+        <button id="up">Up</button>
+        <div id="options">
+            <h2>Options</h2>
+            <div>
+                <h3>Aggregate</h3>
+                <select id="aggregate">
+                    <option value="count">Count</option>
+                    <option value="avg">Avg</option>
+                    <option value="max">Max</option>
+                    <option value="min">Min</option>
+                    <option value="sum">Sum</option>
+                </select>
+                <select id="aggregate-options-count">
+                    <option value="*">*</option>
+                </select>
+                <select id="aggregate-options-avg" style="display: none">
+                    <option value="tip">tip</option>
+                    <option value="fareAmount">fare</option>
+                    <option value="passengers">passengers</option>
+                    <option value="tripDistance">distance</option>
+                </select>
+            </div>
+            <div>
+                <h3>Where</h3>
+                <input type="text" id="where-display" disabled="disabled" />
+                <div id="where-controls">
+                    <select id="field">
+                        <option value="tip">tip</option>
+                        <option value="fareAmount">fare</option>
+                        <option value="passengers">passengers</option>
+                        <option value="tripDistance">distance</option>
+                    </select>
+                    <select id="operator">
+                        <option value="less">less than</option>
+                        <option value="equal">equal to</option>
+                        <option value="more">more than</option>
+                    </select>
+                    <input type="text" id="where-input" />
+                    <button id="and">ADD</button>
+                </div>
+            </div>
+            <button id="send">Run and add to chart</button>
+        </div>
     </div>
-    <div>
-        <h3>Where</h3>
-        <select id="field">
-            <option value="tip">tip</option>
-            <option value="fareAmount">fare</option>
-            <option value="passengers">passengers</option>
-            <option value="tripDistance">distance</option>
-        </select>
-        <select id="operator">
-            <option value="less">less than</option>
-            <option value="equal">equal to</option>
-            <option value="more">more than</option>
-        </select>
-        <input type="text" id="value" />
-        <button id="and">AND</button>
-        <span>-</span>
-        <input type="text" id="where" disabled="disabled" />
-    </div>
-    <button id="send">Add to chart</button>
 
     <script>
         var chartElem = document.getElementById("myChart")
         var ctx = chartElem.getContext('2d');
-        var loading = document.getElementById("loading");
+        var loadingElem = document.getElementById("loading");
+        var options = document.getElementById("options");
         var up = document.getElementById("up");
         var field = document.getElementById("field");
         var operator = document.getElementById("operator");
-        var textArea = document.getElementById("value");
+        var textArea = document.getElementById("where-input");
         var andButton = document.getElementById("and");
         var queryButton = document.getElementById("send");
-        var whereInput = document.getElementById("where");
+        var whereInput = document.getElementById("where-display");
         var selectAggregate = document.getElementById("aggregate");
-        var aggregateOptionsCount = document.getElementById("aggregateOptionsCount");
-        var aggregateOptionsAvg = document.getElementById("aggregateOptionsAvg");
+        var aggregateOptionsCount = document.getElementById("aggregate-options-count");
+        var aggregateOptionsAvg = document.getElementById("aggregate-options-avg");
         var selectedAggregateSelect = aggregateOptionsCount;
         var where = null;
-        var i = 0;
         var level = 0;
         var month= null;
         var day= null;
+        var loading = false;
 
         up.style.display = 'none';
         up.onclick = function() {
@@ -96,6 +141,9 @@
                     selectedAggregateSelect = aggregateOptionsCount;
                     break;
                 case "avg":
+                case "sum":
+                case "max":
+                case "min":
                     aggregateOptionsCount.style.display = "none";
                     aggregateOptionsAvg.style.display = "inline-block";
                     selectedAggregateSelect = aggregateOptionsAvg;
@@ -113,15 +161,18 @@
         queryButton.onclick = query;
 
         function draw() {
+            options.style.display = "block";
             myChart = new Chart(ctx, {
                 type: 'line',
                 data: data,
                 options: {
                     onClick: function(event, elems) {
-                        if (elems.length > 0 && level < 2) {
+                        event.stopPropagation();
+                        if (elems.length > 0 && level < 2 && !loading) {
+                            onLoading();
                             var chartData = elems[0]['_chart'].config.data;
                             var idx = elems[0]['_index'];
-                            loading.style.display = 'block';
+                            
                             if (level === 0) {
                                 level = 1;
                                 month = chartData.labels[idx];
@@ -132,7 +183,6 @@
                                 fetchData();
                             }
                         }
-                        event.stopPropagation();
                     },
                     events: ["click"],
                     scales: {
@@ -146,18 +196,33 @@
             });
         }
 
+        function onLoading() {
+            loading = true;
+            loadingElem.style.display = 'block';
+            options.style.display = "none";
+            up.style.display = "none";
+            whereInput.value = "";
+            where = null;
+        }
+
+        function onLoaded() {
+            loading = false;
+            loadingElem.style.display = 'none';
+
+            if (level > 0) {
+                up.style.display = 'block';
+            }
+
+        }
+
         function addDataset(newData) {
-            i++;
-            loading.style.display = 'none';
+            onLoaded();
             data.labels = newData.periods;
             data.datasets.push({
                 label: newData.where,
                 data: newData.counts
             });
-            if (level > 0) {
-                up.style.display = 'block';
-            }
-            chartElem.style.display = 'block';
+
             myChart.update();
         }
 
@@ -176,11 +241,8 @@
             return fetchQ;
         }
 
-        function fetchData() {
-            where = null;
-            loading.style.display = 'block';
-            up.style.display = 'none';
-            chartElem.style.display = 'none';
+        function fetchData(fetchWhere="") {
+            onLoading();
             data = {
                 labels: [],
                 datasets: []
@@ -188,7 +250,7 @@
 
             var fetchQ = getQueryBase()
             var aggregate = selectAggregate.value + "(" + selectedAggregateSelect.value + ")";
-            fetch(fetchQ + "&aggregate="+aggregate).then(function(resp) {
+            fetch(fetchQ + "&aggregate="+aggregate+fetchWhere).then(function(resp) {
                 resp.json().then(function(newData) {
                     draw();
                     addDataset(newData);
@@ -200,6 +262,11 @@
             var val = field.value;
             var op = operator.value;
             var txt = textArea.value;
+
+            if (txt === "") {
+                return;
+            }
+
             var opVal = "=";
             if (op === "less") {
                 opVal = "<";
@@ -219,25 +286,13 @@
         }
 
         function query() {
-            var fetchQ = getQueryBase();
-            loading.style.display = 'block';
-            chartElem.style.display = 'none';
-            whereInput.value = "";
-            where = null;
-            var aggregate = selectAggregate.value + "(" + selectedAggregateSelect.value + ")";
-            var fetchWhere = "";
             if (where != null) {
                 fetchWhere="&where="+where;
             }
-            fetch(fetchQ + "&aggregate="+aggregate+fetchWhere).then(function(resp) {
-                resp.json().then(function(data) {
-                    draw();
-                    addDataset(data);
-                });
-            });
+            fetchData(fetchWhere)
         }
 
-        fetchData();
+        draw();
     </script>
 </body>
 </html>

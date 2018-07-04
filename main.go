@@ -24,7 +24,7 @@ func routes() *mux.Router {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/", index).Methods("GET")
-	router.HandleFunc("/all", yearData).Methods("GET")
+	router.HandleFunc("/all", allDataHandler).Methods("GET")
 	s := http.StripPrefix("/static/", http.FileServer(http.Dir("./static/")))
 	router.PathPrefix("/static/").Handler(s).Methods("GET")
 
@@ -96,7 +96,7 @@ func index(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/static/", http.StatusFound)
 }
 
-func getData(queryTxt string) (*calendarData, error) {
+func dataFromServer(queryTxt string) (*calendarData, error) {
 	fmt.Println(queryTxt)
 	query := gocb.NewAnalyticsQuery(queryTxt)
 	results, err := cluster.ExecuteAnalyticsQuery(query)
@@ -123,7 +123,7 @@ func getData(queryTxt string) (*calendarData, error) {
 	}, nil
 }
 
-func yearData(w http.ResponseWriter, r *http.Request) {
+func allDataHandler(w http.ResponseWriter, r *http.Request) {
 	whereQ := r.URL.Query()["where"]
 	periodQ := r.URL.Query()["period"]
 	aggregate := r.URL.Query()["aggregate"][0]
@@ -162,7 +162,7 @@ func yearData(w http.ResponseWriter, r *http.Request) {
 	}
 	query := fmt.Sprintf(`select DATE_PART_STR(pickupDate, "%s") AS period, %s as count FROM
 	alltaxis %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`, period, aggregate, where, period)
-	data, err := getData(query)
+	data, err := dataFromServer(query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
