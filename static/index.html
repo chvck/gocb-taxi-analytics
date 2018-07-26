@@ -123,6 +123,12 @@
         var day= null;
         var loading = false;
 
+        var myChart;
+        var data = {
+                labels: [],
+                datasets: []
+            };
+
         up.style.display = 'none';
         up.onclick = function() {
             level = level - 1;
@@ -151,23 +157,15 @@
             }
         }
 
-        var myChart;
-        var data = {
-                labels: [],
-                datasets: []
-            };
-
         andButton.onclick = and;
         queryButton.onclick = query;
 
         function draw() {
-            options.style.display = "block";
             myChart = new Chart(ctx, {
                 type: 'line',
                 data: data,
                 options: {
                     onClick: function(event, elems) {
-                        event.stopPropagation();
                         if (elems.length > 0 && level < 2 && !loading) {
                             onLoading();
                             var chartData = elems[0]['_chart'].config.data;
@@ -183,6 +181,7 @@
                                 fetchData();
                             }
                         }
+                        event.stopPropagation();
                     },
                     events: ["click"],
                     scales: {
@@ -208,6 +207,7 @@
         function onLoaded() {
             loading = false;
             loadingElem.style.display = 'none';
+            options.style.display = "block";
 
             if (level > 0) {
                 up.style.display = 'block';
@@ -241,18 +241,18 @@
             return fetchQ;
         }
 
-        function fetchData(fetchWhere="") {
+        function fetchData(reset=true, fetchWhere="") {
             onLoading();
-            data = {
-                labels: [],
-                datasets: []
-            };
 
             var fetchQ = getQueryBase()
             var aggregate = selectAggregate.value + "(" + selectedAggregateSelect.value + ")";
             fetch(fetchQ + "&aggregate="+aggregate+fetchWhere).then(function(resp) {
                 resp.json().then(function(newData) {
-                    draw();
+                    data.labels = [];
+                    if (reset) {
+                        data.datasets = [];
+                    }
+                    // draw();
                     addDataset(newData);
                 });
             });
@@ -286,10 +286,11 @@
         }
 
         function query() {
+            var fetchWhere = "";
             if (where != null) {
                 fetchWhere="&where="+where;
             }
-            fetchData(fetchWhere)
+            fetchData(false, fetchWhere)
         }
 
         draw();
