@@ -35,9 +35,7 @@ func routes() *mux.Router {
 func run() (*http.Server, error) {
 	r := routes()
 
-	address := fmt.Sprintf("%v:%v", "localhost", "8010")
-
-	srv := &http.Server{Addr: address, Handler: r}
+	srv := &http.Server{Addr: "localhost:8010", Handler: r}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			log.Printf("Error running server: %s", err)
@@ -51,7 +49,7 @@ func runServer() {
 	var err error
 	cluster, err = gocb.Connect("couchbase://localhost")
 	if err != nil {
-		panic("ERROR CONNECTING TO CLUSTER:" + err.Error())
+		panic("Error connecting to cluster:" + err.Error())
 	}
 
 	cluster.Authenticate(gocb.PasswordAuthenticator{
@@ -60,10 +58,10 @@ func runServer() {
 	})
 
 	cluster.EnableAnalytics([]string{"localhost:8095"})
-	cluster.SetAnalyticsTimeout(100 * time.Second)
 
 	stop := make(chan os.Signal, 1)
 
+	// Stop the server on interrupt
 	signal.Notify(stop, os.Interrupt)
 
 	srv, err := run()
@@ -97,6 +95,8 @@ func index(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/static/", http.StatusFound)
 }
 
+// processResults iterates through the analytics results and pulls out
+// the time periods and aggregated data for each time period.
 func processResults(results gocb.AnalyticsResults) (*calendarData, error) {
 	var row map[string]interface{}
 	var dateParts []float64
@@ -107,6 +107,8 @@ func processResults(results gocb.AnalyticsResults) (*calendarData, error) {
 			aggregates = append(aggregates, row["aggregate"].(float64))
 		}
 	}
+
+	// Ensure that we've read all of the data correctly.
 	if err := results.Close(); err != nil {
 		return nil, err
 	}
@@ -123,6 +125,8 @@ type calendarData struct {
 	Where     string    `json:"where"`
 }
 
+// whereTimePeriod creates where clauses for time bounding
+// the analytics query.
 func whereTimePeriod(period string, query url.Values) string {
 	where := ""
 	if period == "day" {
@@ -146,6 +150,9 @@ func whereTimePeriod(period string, query url.Values) string {
 	return where
 }
 
+// processQueryString extracts the parameters that the frontend
+// has sent.
+// e.g. period=hour&month=5&day=14&aggregate=count(*)&where=fareAmount>15&where=tip<1
 func processQueryString(queryString url.Values) (string, string, string) {
 	aggregate := queryString["aggregate"][0]
 	period := "month"
@@ -170,11 +177,18 @@ func processQueryString(queryString url.Values) (string, string, string) {
 	return aggregate, where, period
 }
 
+// requestHandler handles requests to the /all endpoint.
+// It processes the querystring extracting parameters,
+// runs an analytics query, processes the results and
+// then sends a response.
 func requestHandler(w http.ResponseWriter, r *http.Request) {
 	aggregate, where, period := processQueryString(r.URL.Query())
 
-	query := gocb.NewAnalyticsQuery(fmt.Sprintf(`select DATE_PART_STR(pickupDate, "%s") AS period, %s as aggregate FROM
-	sometaxis %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`, period, aggregate, where, period))
+	// We use string formatting here but in the future we'll be able to use
+	// parameterized queries.
+	q := `select DATE_PART_STR(pickupDate, "%s") AS period, %s as aggregate FROM alltaxis`
+	q += `%s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`
+	query := gocb.NewAnalyticsQuery(fmt.Sprintf(q, period, aggregate, where, period))
 	results, err := cluster.ExecuteAnalyticsQuery(query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -199,7 +213,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(js)
 }
 
-// This function processes the data in the original
+// processData processes the data in the original
 // taxi dataset csv and updates the dates to
 // work with Analytics, a step necessary at time of
 // writing.
