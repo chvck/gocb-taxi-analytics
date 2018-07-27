@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -24,7 +25,7 @@ func routes() *mux.Router {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/", index).Methods("GET")
-	router.HandleFunc("/all", allDataHandler).Methods("GET")
+	router.HandleFunc("/all", requestHandler).Methods("GET")
 	s := http.StripPrefix("/static/", http.FileServer(http.Dir("./static/")))
 	router.PathPrefix("/static/").Handler(s).Methods("GET")
 
@@ -34,7 +35,7 @@ func routes() *mux.Router {
 func run() (*http.Server, error) {
 	r := routes()
 
-	address := fmt.Sprintf("%v:%v", "localhost", "8080")
+	address := fmt.Sprintf("%v:%v", "localhost", "8010")
 
 	srv := &http.Server{Addr: address, Handler: r}
 	go func() {
@@ -70,7 +71,7 @@ func runServer() {
 		log.Fatal(err)
 	}
 
-	fmt.Println(srv.Addr)
+	fmt.Println("Server running on", srv.Addr)
 	<-stop
 	log.Println("Stopping server")
 	srv.Shutdown(nil)
@@ -96,88 +97,112 @@ func index(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/static/", http.StatusFound)
 }
 
-func dataFromServer(queryTxt string) (*calendarData, error) {
-	fmt.Println(queryTxt)
-	query := gocb.NewAnalyticsQuery(queryTxt)
-	results, err := cluster.ExecuteAnalyticsQuery(query)
-	if err != nil {
-		panic("ERROR EXECUTING ANALYTICS:" + err.Error())
-	}
-
+func processResults(results gocb.AnalyticsResults) (*calendarData, error) {
 	var row map[string]interface{}
 	var dateParts []float64
-	var counts []float64
+	var aggregates []float64
 	for results.Next(&row) {
 		if datePart, ok := row["period"]; ok {
 			dateParts = append(dateParts, datePart.(float64))
-			counts = append(counts, row["count"].(float64))
+			aggregates = append(aggregates, row["aggregate"].(float64))
 		}
 	}
-	if err = results.Close(); err != nil {
+	if err := results.Close(); err != nil {
 		return nil, err
 	}
 
 	return &calendarData{
 		DateParts: dateParts,
-		Counts:    counts,
+		Aggregate: aggregates,
 	}, nil
 }
 
-func allDataHandler(w http.ResponseWriter, r *http.Request) {
-	whereQ := r.URL.Query()["where"]
-	periodQ := r.URL.Query()["period"]
-	aggregate := r.URL.Query()["aggregate"][0]
+type calendarData struct {
+	DateParts []float64 `json:"periods"`
+	Aggregate []float64 `json:"aggregate"`
+	Where     string    `json:"where"`
+}
+
+func whereTimePeriod(period string, query url.Values) string {
+	where := ""
+	if period == "day" {
+		month := query["month"][0]
+		if month == "1" {
+			where = `pickupDate <= "2016-01-31 23:59:59"`
+		} else if month == "12" {
+			where = `pickupDate >= "2016-12-01 00:00:00"`
+		} else {
+			monthInt, _ := strconv.ParseFloat(month, 64)
+			where = fmt.Sprintf(`pickupDate >= "2016-%02g-01T00:00:00" AND pickupDate <= "2016-%02g-31T23:59:59"`, monthInt, monthInt)
+		}
+	} else if period == "hour" {
+		month := query["month"][0]
+		monthInt, _ := strconv.ParseFloat(month, 64)
+		day := query["day"][0]
+		dayInt, _ := strconv.ParseFloat(day, 64)
+		where = fmt.Sprintf(`pickupDate > "2016-%02g-%02gT00:00:00" AND pickupDate <= "2016-%02g-%02gT23:59:59"`, monthInt, dayInt, monthInt, dayInt)
+	}
+
+	return where
+}
+
+func processQueryString(queryString url.Values) (string, string, string) {
+	aggregate := queryString["aggregate"][0]
 	period := "month"
 	where := ""
-	if len(periodQ) > 0 {
-		period = periodQ[0]
-		if period == "day" {
-			month := r.URL.Query()["month"][0]
-			if month == "1" {
-				where = `pickupDate <= "2016-01-31 23:59:59"`
-			} else if month == "12" {
-				where = `pickupDate >= "2016-12-01 00:00:00"`
-			} else {
-				monthInt, _ := strconv.ParseFloat(month, 64)
-				where = fmt.Sprintf(`pickupDate >= "2016-%02g-01T00:00:00" AND pickupDate <= "2016-%02g-31T23:59:59"`, monthInt, monthInt)
-			}
-		} else if period == "hour" {
-			month := r.URL.Query()["month"][0]
-			monthInt, _ := strconv.ParseFloat(month, 64)
-			day := r.URL.Query()["day"][0]
-			dayInt, _ := strconv.ParseFloat(day, 64)
-			where = fmt.Sprintf(`pickupDate > "2016-%02g-%02gT00:00:00" AND pickupDate <= "2016-%02g-%02gT23:59:59"`, monthInt, dayInt, monthInt, dayInt)
-		}
+	if len(queryString["period"]) > 0 {
+		period = queryString["period"][0]
+		where = whereTimePeriod(period, queryString)
 	}
-	if len(whereQ) > 0 {
+
+	for _, cond := range queryString["where"] {
 		if len(where) > 0 {
-			where = fmt.Sprintf("%s AND %s", where, whereQ[0])
+			where = fmt.Sprintf("%s AND %s", where, cond)
 		} else {
-			where = fmt.Sprintf("%s", whereQ[0])
+			where = fmt.Sprintf("%s", cond)
 		}
 	}
 
 	if len(where) > 0 {
 		where = fmt.Sprintf("WHERE %s", where)
 	}
-	query := fmt.Sprintf(`select DATE_PART_STR(pickupDate, "%s") AS period, %s as count FROM
-	alltaxis %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`, period, aggregate, where, period)
-	data, err := dataFromServer(query)
+
+	return aggregate, where, period
+}
+
+func requestHandler(w http.ResponseWriter, r *http.Request) {
+	aggregate, where, period := processQueryString(r.URL.Query())
+
+	query := gocb.NewAnalyticsQuery(fmt.Sprintf(`select DATE_PART_STR(pickupDate, "%s") AS period, %s as aggregate FROM
+	sometaxis %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`, period, aggregate, where, period))
+	results, err := cluster.ExecuteAnalyticsQuery(query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	data.Where = aggregate + where
+	data, err := processResults(results)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data.Where = fmt.Sprintf("%s %s", aggregate, where)
 	js, err := json.Marshal(*data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(200)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(js)
-
 }
+
+// This function processes the data in the original
+// taxi dataset csv and updates the dates to
+// work with Analytics, a step necessary at time of
+// writing.
 func processData(path string) {
 	destFile, err := os.Create("2016_Green_Taxi_Trip_Data.csv")
 	if err != nil {
@@ -302,10 +327,4 @@ func processData(path string) {
 			panic(err.Error())
 		}
 	}
-}
-
-type calendarData struct {
-	DateParts []float64 `json:"periods"`
-	Counts    []float64 `json:"counts"`
-	Where     string    `json:"where"`
 }
