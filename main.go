@@ -19,7 +19,13 @@ import (
 	"github.com/gorilla/mux"
 )
 
-var cluster *gocb.Cluster
+var (
+	cbConnStr       = "couchbase://localhost"
+	cbAnalyticsNode = "localhost:8095"
+	cbUsername      = "user"
+	cbPassword      = "password"
+	cluster         *gocb.Cluster
+)
 
 func routes() *mux.Router {
 	router := mux.NewRouter()
@@ -47,17 +53,17 @@ func run() (*http.Server, error) {
 
 func runServer() {
 	var err error
-	cluster, err = gocb.Connect("couchbase://localhost")
+	cluster, err = gocb.Connect(cbConnStr)
 	if err != nil {
 		panic("Error connecting to cluster:" + err.Error())
 	}
 
 	cluster.Authenticate(gocb.PasswordAuthenticator{
-		Username: "Administrator",
-		Password: "password",
+		Username: cbUsername,
+		Password: cbPassword,
 	})
 
-	cluster.EnableAnalytics([]string{"localhost:8095"})
+	cluster.EnableAnalytics([]string{cbAnalyticsNode})
 
 	stop := make(chan os.Signal, 1)
 
