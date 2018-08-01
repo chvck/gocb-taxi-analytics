@@ -34,7 +34,7 @@
 
       #where-controls {
         margin-bottom: 1em;
-     }
+      }
 
       #send {
           height: 2em;
@@ -47,6 +47,19 @@
       #where-input {
           width: 50%;
       }
+
+      #code-queries {
+          white-space: pre-wrap;
+      }
+
+      #controls {
+          height: 100%;
+      }
+
+       #code-queries {
+           overflow: auto;
+           font-family: monospace;
+       }
   </style>
 
 <body>
@@ -57,47 +70,54 @@
     <div id="controls">
         <p id="loading" style="display:none;">Loading...</p>
         <button id="up">Up</button>
-        <div id="options">
-            <h2>Options</h2>
-            <div>
-                <h3>Aggregate</h3>
-                <select id="aggregate">
-                    <option value="count">Count</option>
-                    <option value="avg">Avg</option>
-                    <option value="max">Max</option>
-                    <option value="min">Min</option>
-                    <option value="sum">Sum</option>
-                </select>
-                <select id="aggregate-options-count">
-                    <option value="*">*</option>
-                </select>
-                <select id="aggregate-options-avg" style="display: none">
-                    <option value="tip">tip</option>
-                    <option value="fareAmount">fare</option>
-                    <option value="passengers">passengers</option>
-                    <option value="tripDistance">distance</option>
-                </select>
-            </div>
-            <div>
-                <h3>Where</h3>
-                <input type="text" id="where-display" disabled="disabled" />
-                <div id="where-controls">
-                    <select id="field">
+        <div id="controls-display-loaded">
+            <div id="options">
+                <h2>Options</h2>
+                <div>
+                    <h3>Aggregate</h3>
+                    <select id="aggregate">
+                        <option value="count">Count</option>
+                        <option value="avg">Avg</option>
+                        <option value="max">Max</option>
+                        <option value="min">Min</option>
+                        <option value="sum">Sum</option>
+                    </select>
+                    <select id="aggregate-options-count">
+                        <option value="*">*</option>
+                    </select>
+                    <select id="aggregate-options-avg" style="display: none">
                         <option value="tip">tip</option>
                         <option value="fareAmount">fare</option>
                         <option value="passengers">passengers</option>
                         <option value="tripDistance">distance</option>
                     </select>
-                    <select id="operator">
-                        <option value="less">less than</option>
-                        <option value="equal">equal to</option>
-                        <option value="more">more than</option>
-                    </select>
-                    <input type="text" id="where-input" />
-                    <button id="and">ADD</button>
+                </div>
+                <div>
+                    <h3>Where</h3>
+                    <input type="text" id="where-display" disabled="disabled" />
+                    <div id="where-controls">
+                        <select id="field">
+                            <option value="tip">tip</option>
+                            <option value="fareAmount">fare</option>
+                            <option value="passengers">passengers</option>
+                            <option value="tripDistance">distance</option>
+                        </select>
+                        <select id="operator">
+                            <option value="less">less than</option>
+                            <option value="equal">equal to</option>
+                            <option value="more">more than</option>
+                        </select>
+                        <input type="text" id="where-input" />
+                        <button id="and">ADD</button>
+                    </div>
+                </div>
+                <button id="send">Run and add to chart</button>
+            </div>
+            <div id="queries">
+                <h2>Queries</h2>
+                <div id="code-queries">
                 </div>
             </div>
-            <button id="send">Run and add to chart</button>
         </div>
     </div>
 
@@ -105,7 +125,7 @@
         var chartElem = document.getElementById("myChart")
         var ctx = chartElem.getContext('2d');
         var loadingElem = document.getElementById("loading");
-        var options = document.getElementById("options");
+        var options = document.getElementById("controls-display-loaded");
         var up = document.getElementById("up");
         var field = document.getElementById("field");
         var operator = document.getElementById("operator");
@@ -116,12 +136,15 @@
         var selectAggregate = document.getElementById("aggregate");
         var aggregateOptionsCount = document.getElementById("aggregate-options-count");
         var aggregateOptionsAvg = document.getElementById("aggregate-options-avg");
+        var codeResults = document.getElementById("code-queries");
         var selectedAggregateSelect = aggregateOptionsCount;
+        codeResults.style.maxHeight = window.innerHeight / 2 + "px";
         var where = [];
         var level = 0;
         var month= null;
         var day= null;
         var loading = false;
+        var resultQueries = [];
 
         var myChart;
         var data = {
@@ -225,6 +248,9 @@
                 label: newData.where,
                 data: newData.aggregate
             });
+            var seconds = Math.round((newData.taken / 1000000000) * 100) / 100;
+            resultQueries.push(newData.query + " (" + seconds + "s)");
+            codeResults.innerHTML = resultQueries.join("\r\n\r\n");
 
             myChart.update();
         }

@@ -129,6 +129,8 @@ type calendarData struct {
 	DateParts []float64 `json:"periods"`
 	Aggregate []float64 `json:"aggregate"`
 	Where     string    `json:"where"`
+	TimeTaken int64     `json:"taken"`
+	Query     string    `json:"query"`
 }
 
 // whereTimePeriod creates where clauses for time bounding
@@ -193,13 +195,17 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	// We use string formatting here but in the future we'll be able to use
 	// parameterized queries.
 	q := `select DATE_PART_STR(pickupDate, "%s") AS period, %s as aggregate FROM alltaxis`
-	q += `%s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`
-	query := gocb.NewAnalyticsQuery(fmt.Sprintf(q, period, aggregate, where, period))
+	q += ` %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`
+	q = fmt.Sprintf(q, period, aggregate, where, period)
+	query := gocb.NewAnalyticsQuery(q)
+
+	start := time.Now()
 	results, err := cluster.ExecuteAnalyticsQuery(query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	elapsed := time.Since(start)
 
 	data, err := processResults(results)
 	if err != nil {
@@ -208,6 +214,8 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data.Where = fmt.Sprintf("%s %s", aggregate, where)
+	data.Query = q
+	data.TimeTaken = elapsed.Nanoseconds()
 	js, err := json.Marshal(*data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
