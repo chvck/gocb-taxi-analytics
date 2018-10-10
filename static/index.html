@@ -308,11 +308,11 @@
                 opVal = ">";
             }
 
-            var and = val + opVal + txt;
+            var and = [val, opVal, txt];
             where.push(and);
 
             textArea.value = "";
-            whereInput.value = where.join(' AND ');
+            whereInput.value = where.join(" AND ").split(",").join(" ");
         }
 
         function query() {

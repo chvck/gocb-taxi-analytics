@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/couchbase/gocb"
@@ -20,11 +21,10 @@ import (
 )
 
 var (
-	cbConnStr       = "couchbase://localhost"
-	cbAnalyticsNode = "localhost:8095"
-	cbUsername      = "user"
-	cbPassword      = "password"
-	cluster         *gocb.Cluster
+	cbConnStr  = "couchbase://localhost"
+	cbUsername = "user"
+	cbPassword = "password"
+	cluster    *gocb.Cluster
 )
 
 func routes() *mux.Router {
@@ -63,7 +63,10 @@ func runServer() {
 		Password: cbPassword,
 	})
 
-	cluster.EnableAnalytics([]string{cbAnalyticsNode})
+	_, err = cluster.OpenBucket("taxis", "")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	stop := make(chan os.Signal, 1)
 
@@ -158,31 +161,53 @@ func whereTimePeriod(period string, query url.Values) string {
 	return where
 }
 
+type queryOptions struct {
+	Aggregate string
+	Where     string
+	Period    string
+	Params    []interface{}
+}
+
 // processQueryString extracts the parameters that the frontend
 // has sent.
 // e.g. period=hour&month=5&day=14&aggregate=count(*)&where=fareAmount>15&where=tip<1
-func processQueryString(queryString url.Values) (string, string, string) {
+func processQueryString(queryString url.Values) (*queryOptions, error) {
 	aggregate := queryString["aggregate"][0]
 	period := "month"
 	where := ""
+	numParams := 0
+	var params []interface{}
+
 	if len(queryString["period"]) > 0 {
 		period = queryString["period"][0]
 		where = whereTimePeriod(period, queryString)
 	}
 
 	for _, cond := range queryString["where"] {
+		numParams++
+		condParts := strings.Split(cond, ",")
 		if len(where) > 0 {
-			where = fmt.Sprintf("%s AND %s", where, cond)
+			where = fmt.Sprintf("%s AND %s %s $%d", where, condParts[0], condParts[1], numParams)
 		} else {
-			where = fmt.Sprintf("%s", cond)
+			where = fmt.Sprintf("%s %s $%d", condParts[0], condParts[1], numParams)
 		}
+		val, err := strconv.Atoi(condParts[2])
+		if err != nil {
+			return nil, err
+		}
+		params = append(params, val)
 	}
 
 	if len(where) > 0 {
 		where = fmt.Sprintf("WHERE %s", where)
 	}
 
-	return aggregate, where, period
+	return &queryOptions{
+		Aggregate: aggregate,
+		Where:     where,
+		Period:    period,
+		Params:    params,
+	}, nil
 }
 
 // requestHandler handles requests to the /all endpoint.
@@ -190,22 +215,22 @@ func processQueryString(queryString url.Values) (string, string, string) {
 // runs an analytics query, processes the results and
 // then sends a response.
 func requestHandler(w http.ResponseWriter, r *http.Request) {
-	aggregate, where, period := processQueryString(r.URL.Query())
-
-	// We use string formatting here but in the future we'll be able to use
-	// parameterized queries.
-	q := `select DATE_PART_STR(pickupDate, "%s") AS period, %s as aggregate FROM alltaxis`
-	q += ` %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`
-	q = fmt.Sprintf(q, period, aggregate, where, period)
-	query := gocb.NewAnalyticsQuery(q)
-
-	start := time.Now()
-	results, err := cluster.ExecuteAnalyticsQuery(query)
+	opts, err := processQueryString(r.URL.Query())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	elapsed := time.Since(start)
+
+	q := `select DATE_PART_STR(pickupDate, "%s") AS period, %s as aggregate FROM alltaxis`
+	q += ` %s GROUP BY DATE_PART_STR(pickupDate, "%s") ORDER BY period;`
+	q = fmt.Sprintf(q, opts.Period, opts.Aggregate, opts.Where, opts.Period)
+	query := gocb.NewAnalyticsQuery(q)
+
+	results, err := cluster.ExecuteAnalyticsQuery(query, opts.Params)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	data, err := processResults(results)
 	if err != nil {
@@ -213,9 +238,9 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data.Where = fmt.Sprintf("%s %s", aggregate, where)
-	data.Query = q
-	data.TimeTaken = elapsed.Nanoseconds()
+	data.Where = fmt.Sprintf("%s %s, %v", opts.Aggregate, opts.Where, opts.Params)
+	data.Query = fmt.Sprintf("query = %s, params = %v", q, opts.Params)
+	data.TimeTaken = results.Metrics().ExecutionTime.Nanoseconds()
 	js, err := json.Marshal(*data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
